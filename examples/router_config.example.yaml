@@ -1,0 +1,45 @@
+# Example configuration. Copy to `router_config.yaml` and edit.
+# Set LLM_ROUTER_CONFIG=path/to/router_config.yaml when running the server.
+
+default_tier: strong
+
+rules:
+  enabled: true
+  # Leave null to use all builtin rules. Specify list to subset.
+  enabled_rule_names: null
+
+classifier:
+  enabled: true
+  embedding_model: intfloat/multilingual-e5-small
+  artifact_path: artifacts/classifier.joblib
+  p_low: 0.30
+  p_high: 0.70
+  timeout_ms: 200
+
+stickiness:
+  enabled: true
+  upgrade_only: true
+  ttl_seconds: 3600
+
+tenants:
+  default_policy:
+    forced_tier: null
+    blocked_tiers: []
+    latency_strict: false
+  overrides:
+    customer-acme:
+      forced_tier: strong         # always strong
+    customer-budget:
+      latency_strict: true        # skip Layer 2 to save embedding time
+      classifier_p_high_override: 0.55
+
+gateway:
+  backend: noop
+  tier_to_model:
+    weak: claude-haiku-4-5
+    strong: claude-opus-4-7
+
+logging:
+  level: INFO
+  json_format: true
+  sample_rate: 1.0

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Local
+.env
+.env.local
+*.log
+
+# Trained artifacts (ship via release storage, not git)
+artifacts/
+*.joblib
+*.pkl
+
+# Data (track schema, not content)
+data/*.jsonl
+data/*.csv
+!data/README.md
+!data/sample_*.jsonl
+
+# OS
+.DS_Store
