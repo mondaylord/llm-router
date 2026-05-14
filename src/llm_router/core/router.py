@@ -2,13 +2,19 @@
 
 Layers run in this fixed order:
 
-  1. Pre-router: tenant policy, session state lookup
-  2. Tenant override (forced tier short-circuit)
-  3. Rule engine (Layer 1)
-  4. Classifier (Layer 2)
-  5. Default (configured `default_tier`, typically STRONG)
-  6. Stickiness adjustment (post-process; never downgrades by default)
-  7. Tenant blocked-tier guard (post-process)
+  1. Pre-router: tenant policy, session state lookup, step-type
+     detection (agent context).
+  2. Tenant override (forced tier short-circuit).
+  3. Agent-rule layer (recent-failure escalation, tool whitelists,
+     planning / edit / summarize / long-context). Skipped when
+     agent config is disabled.
+  4. Chat-rule layer (the original text-based heuristics in
+     `rules/builtin.py`).
+  5. Classifier (Layer 2).
+  6. Default (configured `default_tier`, typically STRONG).
+  7. Stickiness adjustment (post-process; never downgrades by default,
+     keyed by `(session_id, step_type)`).
+  8. Tenant blocked-tier guard (post-process).
 
 Each layer either emits a decision (early-exit) or passes through.
 """
@@ -20,14 +26,17 @@ from typing import TYPE_CHECKING
 
 from llm_router.core.config import RouterConfig
 from llm_router.core.decision import (
+    AgentStepType,
     DecisionLayer,
     RoutingDecision,
     RoutingRequest,
     Tier,
 )
+from llm_router.core.messages import detect_step_type
 from llm_router.observability.logger import get_logger
 from llm_router.policy.stickiness import StickinessPolicy
 from llm_router.policy.tenant import TenantPolicyResolver
+from llm_router.rules.agent import default_agent_ruleset
 from llm_router.rules.base import Rule
 from llm_router.rules.builtin import default_ruleset
 from llm_router.session.store import InMemorySessionStore, SessionStore
@@ -45,12 +54,27 @@ class Router:
         self,
         config: RouterConfig,
         rules: list[Rule] | None = None,
+        agent_rules: list[Rule] | None = None,
         classifier: "ClassifierPredictor | None" = None,
         session_store: SessionStore | None = None,
     ) -> None:
         self.config = config
+
+        # Agent rules: built from config unless explicitly overridden.
+        if agent_rules is not None:
+            self.agent_rules = agent_rules
+        elif config.agent.enabled:
+            self.agent_rules = default_agent_ruleset(
+                weak_safe_tools=config.agent.weak_safe_tools,
+                requires_strong_tools=config.agent.requires_strong_tools,
+                long_context_threshold=config.agent.long_context_threshold_tokens,
+                failure_escalation_enabled=config.agent.failure_escalation_enabled,
+            )
+        else:
+            self.agent_rules = []
+
+        # Chat rules
         self.rules = rules if rules is not None else default_ruleset()
-        # Filter rules by config if requested.
         if config.rules.enabled_rule_names is not None:
             wanted = set(config.rules.enabled_rule_names)
             self.rules = [r for r in self.rules if r.name in wanted]
@@ -95,7 +119,12 @@ class Router:
                 elapsed_ms=decision.metadata["elapsed_ms"],
                 tenant_id=request.tenant_id,
                 session_id=request.session_id,
-                prompt_len=len(request.prompt),
+                step_type=(
+                    decision.inferred_step_type.value
+                    if decision.inferred_step_type
+                    else None
+                ),
+                prompt_len=len(request.effective_text),
             )
         return decision
 
@@ -103,22 +132,52 @@ class Router:
     # internals
     # ------------------------------------------------------------------
     def _route_inner(self, request: RoutingRequest) -> RoutingDecision:
+        # Step-type detection. Explicit caller value wins.
+        step_type = request.agent_step_type
+        if step_type is None and self.config.agent.enabled and self.config.agent.auto_detect_step_type:
+            step_type = detect_step_type(request)
+        # Stamp the detected step into request metadata so individual
+        # rules can read it without recomputing or being passed the
+        # config explicitly.
+        if step_type is not None:
+            request.metadata.setdefault("detected_step", step_type.value)
+
         tenant_policy = self.tenant.resolve(request.tenant_id)
 
         # Layer 0: tenant override (short-circuits everything)
         if tenant_policy.forced_tier is not None:
-            return self._maybe_apply_stickiness(
+            return self._finalize(
                 request,
                 RoutingDecision(
                     tier=tenant_policy.forced_tier,
                     layer=DecisionLayer.TENANT_OVERRIDE,
                     reason=f"tenant:forced_{tenant_policy.forced_tier.value}",
                     confidence=1.0,
+                    inferred_step_type=step_type,
                 ),
+                tenant_policy,
+                step_type,
             )
 
-        # Layer 1: rules
         rules_evaluated: list[str] = []
+
+        # Layer 1a: agent rules
+        if self.config.agent.enabled and self.agent_rules:
+            for rule in self.agent_rules:
+                rules_evaluated.append(rule.name)
+                result = rule.evaluate(request)
+                if result.tier is not None:
+                    decision = RoutingDecision(
+                        tier=result.tier,
+                        layer=DecisionLayer.RULE,
+                        reason=result.reason or f"rule:{rule.name}",
+                        confidence=result.confidence,
+                        rules_evaluated=rules_evaluated,
+                        inferred_step_type=step_type,
+                    )
+                    return self._finalize(request, decision, tenant_policy, step_type)
+
+        # Layer 1b: chat rules
         if self.config.rules.enabled:
             for rule in self.rules:
                 rules_evaluated.append(rule.name)
@@ -127,11 +186,12 @@ class Router:
                     decision = RoutingDecision(
                         tier=result.tier,
                         layer=DecisionLayer.RULE,
-                        reason=f"rule:{rule.name}" if not result.reason else result.reason,
+                        reason=result.reason or f"rule:{rule.name}",
                         confidence=result.confidence,
                         rules_evaluated=rules_evaluated,
+                        inferred_step_type=step_type,
                     )
-                    return self._guard_and_stick(request, decision, tenant_policy)
+                    return self._finalize(request, decision, tenant_policy, step_type)
 
         # Layer 2: classifier (skip if tenant requires strict latency)
         if (
@@ -140,7 +200,7 @@ class Router:
             and not tenant_policy.latency_strict
         ):
             try:
-                p_strong = self.classifier.predict_proba_strong(request.prompt)
+                p_strong = self.classifier.predict_proba_strong(request.effective_text)
             except Exception as exc:  # fail open to strong
                 log.warning("classifier_failed", error=str(exc))
                 p_strong = None
@@ -171,8 +231,9 @@ class Router:
                     confidence=max(p_strong, 1.0 - p_strong),
                     classifier_score=p_strong,
                     rules_evaluated=rules_evaluated,
+                    inferred_step_type=step_type,
                 )
-                return self._guard_and_stick(request, decision, tenant_policy)
+                return self._finalize(request, decision, tenant_policy, step_type)
 
         # Layer 3: default
         decision = RoutingDecision(
@@ -181,17 +242,19 @@ class Router:
             reason=f"default:{self.config.default_tier.value}",
             confidence=1.0,
             rules_evaluated=rules_evaluated,
+            inferred_step_type=step_type,
         )
-        return self._guard_and_stick(request, decision, tenant_policy)
+        return self._finalize(request, decision, tenant_policy, step_type)
 
     # ------------------------------------------------------------------
     # post-processing helpers
     # ------------------------------------------------------------------
-    def _guard_and_stick(
+    def _finalize(
         self,
         request: RoutingRequest,
         decision: RoutingDecision,
         tenant_policy,
+        step_type: AgentStepType | None,
     ) -> RoutingDecision:
         # Tenant blocked-tier guard: bump up to strong if blocked.
         if decision.tier in tenant_policy.blocked_tiers:
@@ -202,20 +265,24 @@ class Router:
                 confidence=1.0,
                 classifier_score=decision.classifier_score,
                 rules_evaluated=decision.rules_evaluated,
+                inferred_step_type=step_type,
             )
-        return self._maybe_apply_stickiness(request, decision)
+        return self._maybe_apply_stickiness(request, decision, step_type)
 
     def _maybe_apply_stickiness(
-        self, request: RoutingRequest, decision: RoutingDecision
+        self,
+        request: RoutingRequest,
+        decision: RoutingDecision,
+        step_type: AgentStepType | None,
     ) -> RoutingDecision:
         if not self.config.stickiness.enabled or request.session_id is None:
             return decision
-        adjusted = self.stickiness.apply(
+        return self.stickiness.apply(
             session_store=self.session_store,
             session_id=request.session_id,
             proposed=decision,
+            step_type=step_type,
         )
-        return adjusted
 
     # ------------------------------------------------------------------
     def _should_log(self, request: RoutingRequest) -> bool:
@@ -225,5 +292,5 @@ class Router:
         if rate <= 0.0:
             return False
         # Deterministic by session/prompt to avoid log flicker per turn.
-        key = request.session_id or request.prompt
+        key = request.session_id or request.effective_text
         return (hash(key) % 10000) / 10000.0 < rate

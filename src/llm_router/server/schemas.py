@@ -7,15 +7,34 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from llm_router.core.decision import DecisionLayer, RoutingDecision, Tier
+from llm_router.core.decision import (
+    AgentStepType,
+    DecisionLayer,
+    Message,
+    Outcome,
+    RoutingDecision,
+    Tier,
+)
 
 
 class RouteRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str
+    # Either prompt or messages.
+    prompt: str | None = None
+    messages: list[Message] | None = None
+
     session_id: str | None = None
     tenant_id: str | None = None
+
+    # Agent fields. All optional — chat-only clients can ignore.
+    agent_step_type: AgentStepType | None = None
+    available_tools: list[str] = Field(default_factory=list)
+    planned_tool: str | None = None
+    last_tool_called: str | None = None
+    recent_outcomes: list[Outcome] = Field(default_factory=list)
+    total_context_tokens: int = 0
+
     history_turns: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -30,6 +49,7 @@ class RouteResponseBody(BaseModel):
     classifier_score: float | None = None
     rules_evaluated: list[str]
     elapsed_ms: float
+    inferred_step_type: AgentStepType | None = None
 
     @classmethod
     def from_decision(cls, d: RoutingDecision) -> RouteResponseBody:
@@ -41,6 +61,7 @@ class RouteResponseBody(BaseModel):
             classifier_score=d.classifier_score,
             rules_evaluated=d.rules_evaluated,
             elapsed_ms=float(d.metadata.get("elapsed_ms", 0.0)),
+            inferred_step_type=d.inferred_step_type,
         )
 
 

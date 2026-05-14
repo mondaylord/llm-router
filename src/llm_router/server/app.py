@@ -59,14 +59,23 @@ async def healthz() -> HealthResponse:
 
 @app.post("/route", response_model=RouteResponseBody)
 async def route(body: RouteRequestBody) -> RouteResponseBody:
-    if not body.prompt:
-        raise HTTPException(status_code=400, detail="prompt is required")
+    if not body.prompt and not body.messages:
+        raise HTTPException(
+            status_code=400, detail="either `prompt` or `messages` is required"
+        )
     router: Router = app.state.router
     decision = router.route(
         RoutingRequest(
             prompt=body.prompt,
+            messages=body.messages,
             session_id=body.session_id,
             tenant_id=body.tenant_id,
+            agent_step_type=body.agent_step_type,
+            available_tools=body.available_tools,
+            planned_tool=body.planned_tool,
+            last_tool_called=body.last_tool_called,
+            recent_outcomes=body.recent_outcomes,
+            total_context_tokens=body.total_context_tokens,
             history_turns=body.history_turns,
             metadata=body.metadata,
         )

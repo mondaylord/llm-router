@@ -76,13 +76,41 @@ predictor. Real production deployment needs Phase-0 data substituted.
 
 ---
 
-## Phase 3 — Long-tail and cascade
+## Phase 2.5 — Agent-mode routing (implemented 2026-05-14)
 
-**Goal**: catch the cases where rules + classifier fail.
+**Goal**: make the same router serve both chat and agent (Cursor-style)
+flows. Different traffic class, same primitives.
 
-- **Cascade for batch / async paths**: try `weak` first, score output
-  quality, escalate to `strong` if score < threshold. Only viable for
-  non-streaming workloads.
+- `RoutingRequest` extended with `messages`, `agent_step_type`,
+  `available_tools`, `planned_tool`, `recent_outcomes`,
+  `total_context_tokens`.
+- New rule layer `rules/agent.py` runs before chat rules.
+- Cascade realized as a rule that fires on `recent_outcomes` —
+  router stays stateless; the caller observes failures and passes
+  them back next turn.
+- Stickiness keyed by `(session_id, step_type)`; default non-sticky
+  for `tool_call`, `tool_result`, `summarize`.
+
+**Why early**: agent traffic is where mis-routing is most expensive
+(a bad tool-call routing breaks the run, not just costs more). The
+work was originally slotted in Phase 3 cascade but split out because
+it needs a schema change.
+
+**Exit criterion**: same as Phase 2 (within 70% of ideal Pareto curve)
+but evaluated separately on agent-stratified traffic.
+
+---
+
+## Phase 3 — Long-tail and output-driven cascade
+
+**Goal**: catch the cases where rules + classifier fail, AND where the
+failure signal is only available in the model output.
+
+- **Output-driven cascade** (extends Phase 2.5): for the non-streaming
+  paths, the gateway adapter can post-score weak-model output (parse,
+  schema-validate, lint) and call `router.route(...)` again with a
+  fresh `Outcome` to escalate. This is a thin wrapper around what
+  Phase 2.5 already supports.
 - **KNN long-tail**: collect user-feedback bad cases (👎, retries,
   copy-then-edit signals). Embed and store in a vector DB. At route
   time, if any neighbor of the incoming prompt has a known-bad-on-weak

@@ -256,7 +256,94 @@ See [EVAL.md](EVAL.md) for the full methodology.
 
 ---
 
-## 8. What is intentionally NOT in v0
+## 8. Agent-mode routing
+
+A second flavor of caller — agent loops — needs more than `prompt: str`.
+The router supports it through three additions:
+
+### 8.1 Richer request schema
+
+`RoutingRequest` carries (all optional, backward-compatible):
+
+- `messages: list[Message]` — OpenAI/Anthropic-style chat history.
+- `agent_step_type: AgentStepType` — explicit step label (`PLANNING`,
+  `TOOL_CALL`, `TOOL_RESULT`, `EDIT`, `SUMMARIZE`, `CHAT`).
+- `available_tools: list[str]` and `planned_tool: str` — what the agent
+  may call this turn / will call.
+- `recent_outcomes: list[Outcome]` — failure / quality signals from
+  prior turns of this session (`TOOL_SCHEMA_ERROR`,
+  `TOOL_EXECUTION_ERROR`, `PARSE_ERROR`, `VALIDATION_ERROR`,
+  `USER_NEGATIVE_FEEDBACK`, ...). This is how cascade is realized.
+- `total_context_tokens: int` — caller-known assembled context size.
+
+The caller can pass `agent_step_type` explicitly; if absent, the router
+auto-detects from messages + tools (see `core/messages.py`).
+
+### 8.2 Agent rules
+
+`rules/agent.py` adds a layer that runs *before* the chat rules:
+
+1. `RecentFailureRule` — any failure outcome → `STRONG`.
+2. `RequiresStrongToolRule` — `TOOL_CALL` + tool in the high-stakes
+   whitelist → `STRONG`.
+3. `LongContextRule` — `total_context_tokens` past threshold → `STRONG`.
+4. `PlanningStepRule` — `PLANNING` step → `STRONG`.
+5. `SafeToolCallRule` — `TOOL_CALL` + tool in the safe whitelist → `WEAK`.
+6. `ToolResultInterpretationRule` — small tool result → `WEAK`.
+7. `EditStepRule` — `EDIT` step: small → `WEAK`, otherwise `STRONG`.
+8. `SummarizeStepRule` — `SUMMARIZE` step → `WEAK`.
+
+Tool whitelists are config-driven (`AgentConfig.weak_safe_tools` and
+`requires_strong_tools`). The product team owns them — we don't ship
+opinionated defaults, since the right list depends on the agent.
+
+### 8.3 Per-step-type stickiness
+
+Session state is now keyed by `(session_id, step_type)`. Implications:
+
+- A planning step that escalated to `STRONG` does **not** pin the next
+  `tool_call` step on the same session.
+- The same `tool_call` step type *can* be sticky within a session — once
+  `edit_file` failed and we escalated, repeated `tool_call` requests
+  stay on strong.
+
+For agent workloads we recommend treating `tool_call`, `tool_result`,
+and `summarize` as **non-sticky** step types: each turn re-decides.
+Planning and edit stay sticky because their context carries over.
+
+This is configured by `StickinessConfig.non_sticky_step_types` and
+ships set in `examples/agent_preset.example.yaml`.
+
+### 8.4 Cascade via outcomes
+
+The router does NOT call models. The caller is responsible for
+observing failures (tool schema/exec, parse, validation, ...) and
+passing them back in `recent_outcomes` on the next turn. Then the
+`RecentFailureRule` escalates. This is simpler than an in-router
+cascade because:
+
+- It keeps the router stateless across calls.
+- The caller already has the most reliable failure signals; we don't
+  guess from model output.
+- Heuristics for failure detection (regex on tool output, schema
+  validation, parse failure) live in the agent framework, where they
+  belong — not in the router.
+
+If the caller can't produce structured failure signals, partial
+heuristics still help: passing `OutcomeKind.RETRY_ATTEMPT` when the
+caller knows it's a retry, or `USER_NEGATIVE_FEEDBACK` from a thumbs-
+down handler, both feed the same escalation path.
+
+### 8.5 Mode coexistence
+
+`AgentConfig.enabled = True` is the default. Chat-only callers simply
+pass `prompt=...` with no agent fields and the agent rules become
+no-ops (every agent rule short-circuits when its required signal is
+missing). One router can serve both kinds of traffic.
+
+---
+
+## 9. What is intentionally NOT in v0
 
 - **Cascade** (Stage 3): try-cheap-then-escalate. Implemented later because
   reliable quality detection on partial outputs is its own research problem.

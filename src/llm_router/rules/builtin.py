@@ -32,7 +32,7 @@ class ShortGreetingRule(Rule):
     )
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        if self._GREETING_PATTERNS.match(request.prompt):
+        if self._GREETING_PATTERNS.match(request.effective_text):
             return RuleResult(tier=Tier.WEAK, reason="rule:short_greeting")
         return RuleResult()
 
@@ -45,7 +45,7 @@ class VeryShortQueryRule(Rule):
     MAX_CHARS = 30
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        text = request.prompt.strip()
+        text = request.effective_text.strip()
         if len(text) > self.MAX_CHARS:
             return RuleResult()
         # Don't fire on short code/math snippets.
@@ -66,7 +66,7 @@ class SimpleYesNoRule(Rule):
     MAX_CHARS = 80
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        text = request.prompt.strip().lower()
+        text = request.effective_text.strip().lower()
         if not text.endswith("?"):
             return RuleResult()
         if len(text) > self.MAX_CHARS:
@@ -89,7 +89,7 @@ class LongPromptRule(Rule):
     MIN_CHARS = 4000
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        if len(request.prompt) >= self.MIN_CHARS:
+        if len(request.effective_text) >= self.MIN_CHARS:
             return RuleResult(tier=Tier.STRONG, reason="rule:long_prompt")
         return RuleResult()
 
@@ -104,7 +104,7 @@ class CodeBlockRule(Rule):
     _FENCE = re.compile(r"```([\s\S]*?)```")
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        matches = self._FENCE.findall(request.prompt)
+        matches = self._FENCE.findall(request.effective_text)
         if not matches:
             return RuleResult()
         total = sum(len(m) for m in matches)
@@ -128,7 +128,7 @@ class HighStakesKeywordRule(Rule):
     )
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        if self._KEYWORDS.search(request.prompt):
+        if self._KEYWORDS.search(request.effective_text):
             return RuleResult(tier=Tier.STRONG, reason="rule:high_stakes_keywords")
         return RuleResult()
 
@@ -147,7 +147,7 @@ class MultiStepReasoningRule(Rule):
     )
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        if self._CUES.search(request.prompt):
+        if self._CUES.search(request.effective_text):
             return RuleResult(tier=Tier.STRONG, reason="rule:multi_step_reasoning")
         return RuleResult()
 
@@ -169,9 +169,9 @@ class StructuredOutputRule(Rule):
     )
 
     def evaluate(self, request: RoutingRequest) -> RuleResult:
-        if len(request.prompt) > self.MAX_CHARS:
+        if len(request.effective_text) > self.MAX_CHARS:
             return RuleResult()
-        if self._CUES.search(request.prompt):
+        if self._CUES.search(request.effective_text):
             return RuleResult(tier=Tier.WEAK, reason="rule:structured_output_short")
         return RuleResult()
 

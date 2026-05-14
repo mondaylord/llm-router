@@ -59,6 +59,14 @@ class StickinessConfig(BaseModel):
 
     ttl_seconds: int = 3600
 
+    non_sticky_step_types: list[str] = Field(default_factory=list)
+    """Step types where each turn is independent and should NOT pin
+    subsequent turns of the same step type. Typical setting for an
+    agent: ['tool_call', 'tool_result', 'summarize'] — these are
+    atomic operations whose tier should be re-decided each time.
+    Planning and edit steps stay sticky because their context tends
+    to carry over."""
+
 
 class TenantPolicyEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -100,6 +108,42 @@ class GatewayConfig(BaseModel):
     The router does not parse these; the gateway adapter does."""
 
 
+class AgentConfig(BaseModel):
+    """Agent-loop routing config.
+
+    `enabled=True` turns on the agent-specific rules and step-type
+    auto-detection. Chat-only deployments can leave it off — agent
+    rules are no-ops in that case, but the field surface stays clean."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+
+    auto_detect_step_type: bool = True
+    """If True and `request.agent_step_type` is unset, infer it from
+    messages + tools. The explicit caller-provided value always wins."""
+
+    weak_safe_tools: list[str] = Field(default_factory=list)
+    """Tools whose semantics are simple enough that a weak model can
+    drive them reliably (read_file, grep, ls, list_dir, ...).
+    Routing for `step=TOOL_CALL` AND `planned_tool in weak_safe_tools`
+    -> WEAK."""
+
+    requires_strong_tools: list[str] = Field(default_factory=list)
+    """Tools whose correctness is high-stakes (edit_file, run_shell,
+    run_tests, apply_patch, ...). Routing for `step=TOOL_CALL` AND
+    `planned_tool in requires_strong_tools` -> STRONG."""
+
+    long_context_threshold_tokens: int = 8000
+    """If `total_context_tokens >= this`, the LongContextRule fires
+    -> STRONG. Set higher for tenants who routinely run long contexts
+    on weak (rare)."""
+
+    failure_escalation_enabled: bool = True
+    """If a `recent_outcomes` contains an error kind, route -> STRONG.
+    Disable per-tenant if a customer wants to opt out of cascade."""
+
+
 class LoggingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -122,6 +166,7 @@ class RouterConfig(BaseModel):
     classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
     stickiness: StickinessConfig = Field(default_factory=StickinessConfig)
     tenants: TenantConfig = Field(default_factory=TenantConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

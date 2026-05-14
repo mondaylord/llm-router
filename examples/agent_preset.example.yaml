@@ -1,0 +1,83 @@
+# Agent-mode preset.
+#
+# Tuned for agent-loop workloads (Cursor-style auto). Differences from
+# the chat preset:
+#  - agent rules ON, with explicit safe/strong tool whitelists
+#  - classifier p_high lowered to 0.55 (agent traffic should bias to
+#    strong on uncertainty more than chat does, because tool-call
+#    failures cost more)
+#  - failure escalation enabled (cascade via recent_outcomes)
+#  - long-context threshold tuned for typical agent contexts
+#  - stickiness on, per (session_id, step_type)
+
+default_tier: strong
+
+rules:
+  enabled: true
+  enabled_rule_names: null  # all builtin chat rules
+
+classifier:
+  enabled: true
+  embedding_model: intfloat/multilingual-e5-small
+  artifact_path: artifacts/classifier.joblib
+  p_low: 0.30
+  p_high: 0.55           # lower than chat preset (0.70) — bias to strong
+  timeout_ms: 200
+
+stickiness:
+  enabled: true
+  upgrade_only: true
+  ttl_seconds: 3600
+  # Tool calls and tool results are atomic per turn — don't sticky them.
+  # Planning and edit steps stay sticky because their context carries over.
+  non_sticky_step_types:
+    - tool_call
+    - tool_result
+    - summarize
+
+agent:
+  enabled: true
+  auto_detect_step_type: true
+
+  # Tools the weak model can drive. These should be deterministic and
+  # have a clear, narrow schema. ADJUST FOR YOUR AGENT.
+  weak_safe_tools:
+    - read_file
+    - list_dir
+    - grep
+    - ls
+    - get_file_metadata
+    - search_files
+    - fetch_url_head
+
+  # Tools the weak model must not drive — high-stakes side effects or
+  # schemas where a malformed argument breaks the run.
+  requires_strong_tools:
+    - edit_file
+    - write_file
+    - apply_patch
+    - run_shell
+    - run_tests
+    - run_migration
+    - deploy
+    - call_api_with_money
+
+  long_context_threshold_tokens: 8000
+  failure_escalation_enabled: true
+
+tenants:
+  default_policy:
+    forced_tier: null
+    blocked_tiers: []
+    latency_strict: false
+
+gateway:
+  backend: noop
+  tier_to_model:
+    weak: claude-haiku-4-5
+    strong: claude-opus-4-7
+
+logging:
+  level: INFO
+  json_format: true
+  sample_rate: 1.0

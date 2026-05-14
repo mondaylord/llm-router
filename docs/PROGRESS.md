@@ -9,11 +9,17 @@ made along the way. Append-only timeline at bottom.
 
 | Component                            | Status       | Notes                                          |
 | ------------------------------------ | ------------ | ---------------------------------------------- |
-| `core/decision.py` types             | ✅ done      | `RoutingRequest`, `RoutingDecision`, `Tier`    |
-| `core/config.py`                     | ✅ done      | YAML-loadable, validated by pydantic           |
-| `core/router.py` pipeline            | ✅ done      | Pre-router → rules → classifier → synthesizer  |
+| `core/decision.py` types             | ✅ done      | `RoutingRequest` (chat+agent), `Message`,      |
+|                                      |              | `ToolCall`, `Outcome`, `AgentStepType`         |
+| `core/config.py`                     | ✅ done      | YAML-loadable; `AgentConfig` for agent flow    |
+| `core/router.py` pipeline            | ✅ done      | Pre-router → agent rules → chat rules →        |
+|                                      |              | classifier → default; per-step stickiness      |
+| `core/messages.py`                   | ✅ done      | Auto-detect `AgentStepType` from messages+tools|
 | `rules/base.py` rule interface       | ✅ done      | `Rule` ABC, `RuleResult`                       |
-| `rules/builtin.py` rules             | ✅ done      | 8 rules covering common patterns               |
+| `rules/builtin.py` chat rules        | ✅ done      | 8 rules covering common chat patterns          |
+| `rules/agent.py` agent rules         | ✅ done      | 8 rules: failure escalation, planning,         |
+|                                      |              | safe/strong tool whitelists, long context,     |
+|                                      |              | tool-result, edit, summarize                   |
 | `classifier/embedding.py`            | ✅ done      | sentence-transformers wrapper, cached          |
 | `classifier/predictor.py`            | ✅ done      | Loads joblib artifact, predicts `p(strong)`    |
 | `classifier/trainer.py`              | ✅ done      | k-fold + isotonic calibration                  |
@@ -62,7 +68,9 @@ made along the way. Append-only timeline at bottom.
 
 ---
 
-## Smoke-test results (2026-05-06, base build)
+## Smoke-test results
+
+**Base build (2026-05-06)**
 
 - `pytest tests/` — 30/30 pass (rules, router pipeline, classifier
   train/predict roundtrip, FastAPI route + healthz).
@@ -76,6 +84,17 @@ made along the way. Append-only timeline at bottom.
     (rules carried 86% of decisions, classifier 14%)
 - FastAPI `/route` and `/healthz` return correct decisions in-process
   via `httpx.TestClient`.
+
+**Agent build (2026-05-14)**
+
+- `pytest tests/` — 52/52 pass (added 22 agent tests covering step-type
+  detection, all 8 agent rules, per-step-type stickiness, schema
+  validation, and backward compat with chat-only requests).
+- `examples/agent_usage.py` — full 8-step Cursor-style agent flow:
+  planning→strong, safe tool calls (read_file/grep)→weak, tool result
+  interpretation→weak, requires-strong tool (edit_file)→strong,
+  failure escalation via `recent_outcomes`→strong, per-step-type
+  non-sticky behavior verified.
 
 The eval numbers reflect the toy dataset, not production. They confirm
 the harness math is correct; real Pareto improvements depend entirely
@@ -98,6 +117,20 @@ on the Phase-0 labeled set.
   override is supported but discouraged.
 - **2026-05-06**: classifier output is calibrated probability, not raw
   margin. Required for principled threshold tuning.
+- **2026-05-14**: added agent-mode support. Decisions:
+  - `RoutingRequest` keeps backward compat: `prompt` and `messages` are
+    both optional, validator requires one. `effective_text` derives the
+    string used by classifier+chat rules from either source.
+  - Tool whitelists are config-driven, not hardcoded. The right list is
+    product-specific.
+  - Cascade is outcome-driven from the caller, not stateful in router.
+    Keeps the router stateless and lets the agent framework own its
+    own failure detection.
+  - Stickiness is now keyed by `(session_id, step_type)`. Default
+    non-sticky step types in agent preset:
+    `tool_call`, `tool_result`, `summarize`.
+  - Step-type auto-detection is heuristic and best-effort; explicit
+    `agent_step_type` from the caller always wins.
 
 ---
 

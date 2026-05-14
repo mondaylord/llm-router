@@ -6,8 +6,11 @@ easy traffic and expensive models are reserved for queries that need them.
 
 This is a **base implementation** intended for further iteration. It implements
 **Stage 1 (rule-based early-exit)** and **Stage 2 (embedding + calibrated classifier)**
-of the staged plan in [docs/PLAN.md](docs/PLAN.md), with hooks left in for later
-stages (cascade, KNN long-tail, bandit threshold tuning).
+of the staged plan in [docs/PLAN.md](docs/PLAN.md), plus **Stage 2.5 (agent-mode
+routing)** for Cursor-style auto modes where the same router handles planning
+steps, tool calls, tool-result interpretation, code edits, and failure-driven
+escalation across an agent loop. Hooks are left in for later stages (output-driven
+cascade, KNN long-tail, bandit threshold tuning).
 
 ## Why not just use an existing OSS router?
 
@@ -67,7 +70,7 @@ python examples/eval_run.py
 uvicorn llm_router.server.app:app --reload
 ```
 
-## Core API
+## Core API (chat)
 
 ```python
 from llm_router import Router, RouterConfig, RoutingRequest
@@ -80,11 +83,57 @@ decision = router.route(RoutingRequest(
     tenant_id="customer-acme",
 ))
 # decision.tier == "weak"
-# decision.reason == "rule:short_query"
+# decision.reason == "rule:very_short_query"
 # decision.confidence == 1.0
 ```
 
+## Core API (agent — Cursor-style auto mode)
+
+```python
+from llm_router import (
+    Router, RouterConfig, RoutingRequest,
+    AgentStepType, Outcome, OutcomeKind,
+)
+
+router = Router.from_config(RouterConfig.load("agent_preset.yaml"))
+
+# Planning step → strong
+router.route(RoutingRequest(
+    prompt="Plan how to refactor the auth middleware.",
+    session_id="agent-123",
+))
+
+# Safe tool call → weak
+router.route(RoutingRequest(
+    prompt="Read auth.py",
+    session_id="agent-123",
+    agent_step_type=AgentStepType.TOOL_CALL,
+    planned_tool="read_file",
+))
+
+# High-stakes tool → strong
+router.route(RoutingRequest(
+    prompt="Apply this edit",
+    session_id="agent-123",
+    agent_step_type=AgentStepType.TOOL_CALL,
+    planned_tool="edit_file",
+))
+
+# Last turn failed → escalate
+router.route(RoutingRequest(
+    prompt="Try again",
+    session_id="agent-123",
+    agent_step_type=AgentStepType.TOOL_CALL,
+    planned_tool="edit_file",
+    recent_outcomes=[Outcome(kind=OutcomeKind.TOOL_SCHEMA_ERROR, tool_name="edit_file")],
+))
+```
+
+See [examples/agent_usage.py](examples/agent_usage.py) for a full run, and
+[examples/agent_preset.example.yaml](examples/agent_preset.example.yaml) for
+the agent-mode YAML config.
+
 ## Status
 
-Stage 1 + Stage 2 implemented end-to-end with synthetic data. See
-[docs/PROGRESS.md](docs/PROGRESS.md) for what is real vs scaffolded.
+Stage 1 + Stage 2 + Stage 2.5 (agent) implemented end-to-end with synthetic
+data. See [docs/PROGRESS.md](docs/PROGRESS.md) for what is real vs scaffolded.
