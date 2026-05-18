@@ -12,6 +12,12 @@ steps, tool calls, tool-result interpretation, code edits, and failure-driven
 escalation across an agent loop. Hooks are left in for later stages (output-driven
 cascade, KNN long-tail, bandit threshold tuning).
 
+## Picking up where you left off
+
+Returning to this repo after a break? Start at [docs/STATUS.md](docs/STATUS.md)
+— it's the short "where am I, what's next" pointer. [docs/PROGRESS.md](docs/PROGRESS.md)
+is the deep reference (file map, recipes, full backlog).
+
 ## Why not just use an existing OSS router?
 
 See [docs/DESIGN.md](docs/DESIGN.md#open-source-landscape) for a full comparison.
