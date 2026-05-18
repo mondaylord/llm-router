@@ -280,6 +280,22 @@ Where: write `scripts/build_eval_set.py` that takes a JSONL of prompts, runs eac
 Why: in-memory store doesn't survive restart and doesn't share across workers. Needed for multi-worker `uvicorn` deployments.
 Where: `src/llm_router/session/redis_store.py`. Same `SessionStore` interface. Use `redis-py` (sync) or `redis.asyncio`. Key schema: `llmr:sess:{session_id}` → JSON of `SessionState`.
 
+**[H5] PII detection module** · effort: S · *added 2026-05-14, inspired by vSR ([REVIEW](REVIEW_VS_VSR.md#adopt-1--pii-detection))*
+Why: agent prompts carry credentials, internal URLs, customer data. Different providers have different DPAs — routing PII-laden traffic to the cheap provider can be a compliance problem regardless of quality.
+Where: new module `src/llm_router/safety/pii.py` with `PIIDetector` returning `PIIReport(categories: list[str], spans: list[Span])`. New rule `PiiPresentRule` in agent rules. v0: regex (email / IP / AWS keys / SSH keys / JWT / credit cards). v1: optional spaCy NER. v2: encoder model.
+
+**[H6] Prompt-injection / jailbreak detection** · effort: S · *added 2026-05-14, inspired by vSR*
+Why: agents are uniquely vulnerable because tool outputs (file contents, HTTP responses) are attacker-controllable. Detection at the router lets us force STRONG or refuse.
+Where: `src/llm_router/safety/injection.py` with `InjectionDetector` returning a confidence score. New `InjectionDetectedRule` in agent rules. v0: pattern matching ("ignore previous", "you are now ...", suspicious base64). v1: HuggingFace prompt-guard model.
+
+**[H7] Semantic cache** · effort: M · *added 2026-05-14, inspired by vSR ([REVIEW](REVIEW_VS_VSR.md#adopt-3--semantic-cache))*
+Why: agent loops repeat similar tool calls and tool-result interpretations. Caching at embedding-similarity level (not exact match) recovers cost AND latency that routing alone can't.
+Where: `src/llm_router/cache/semantic_cache.py`. Key: (tenant, tool, embedding-bucket). LRU in v0, Redis later. Skip for non-deterministic step types (`planning`, `edit`). Off by default; tenants opt in.
+
+**[H8] reel-agent integration: TS client + guide** · effort: S · *added 2026-05-14*
+Why: reel-agent is the first concrete consumer (TS+Bun coding agent). Lock the HTTP schema with a typed client so it doesn't drift.
+Where: `examples/clients/typescript/` started in this commit. Expand into a full integration guide at `docs/INTEGRATION_REEL_AGENT.md` (or generalize as `docs/INTEGRATION.md`).
+
 ### Medium priority — for production hardening
 
 **[M1] Shadow traffic runner** · effort: M
@@ -314,6 +330,15 @@ Where: `src/llm_router/classifier/features.py` (new). Concatenate prompt embeddi
 Why: enterprise customers expect their forced-tier / blocked-tier config changes to take effect without restarting workers.
 Where: extend `TenantPolicyResolver` to watch a config file (inotify) or pull from a remote source (HTTP poll). Versioning + atomic swap. Be careful: don't introduce a request-time blocking I/O.
 
+**[M8] OpenAI-compatible proxy mode** · effort: M · *added 2026-05-14, inspired by vSR*
+Why: lets callers swap llm-router in transparently behind an existing OpenAI-compatible client. Removes the need for callers to rewrite their request shapes.
+Where: new endpoint `POST /v1/chat/completions` in `server/app.py` that: (1) parses OpenAI-style body, (2) maps to a `RoutingRequest`, (3) routes, (4) forwards to the gateway-resolved model, (5) returns the OpenAI-shaped response. Requires H1 (concrete gateway).
+
+**[M9] MCP registry awareness** · effort: M · *added 2026-05-14, inspired by vSR*
+Why: if reel-agent (and future agents) standardize on MCP for tool registration, we can auto-classify tools by verb shape instead of hand-maintaining whitelists.
+Where: `src/llm_router/integrations/mcp.py`. Read MCP server tool defs at startup. Heuristically classify (read-only verbs → safe; write/exec → strong) with config override. Wire MCP error envelopes → `Outcome(kind=TOOL_EXECUTION_ERROR)`.
+Decision: do this only after reel-agent confirms MCP adoption.
+
 ### Lower priority — nice to have
 
 **[L1] KNN long-tail router** · effort: L
@@ -343,6 +368,10 @@ Where: `src/llm_router/eval/ab.py`. Wraps multiple `Router` instances behind a d
 **[L7] Multi-region session partitioning** · effort: M
 Why: cross-region session lookups have unacceptable latency; partition by tenant or session-id prefix.
 Where: a `PartitionedSessionStore` that routes by tenant_id → Redis cluster. Depends on H4.
+
+**[L8] Embedding dim truncation (MRL)** · effort: S · *added 2026-05-14, inspired by vSR*
+Why: small latency win on classifier embedding step by truncating to e.g. 128 dims with a Matryoshka-trained model.
+Where: extend `classifier/embedding.py` with a `truncate_to: int | None` config. Requires retraining the classifier head on truncated embeddings. Defer until embedding latency is measured as a bottleneck.
 
 ---
 
